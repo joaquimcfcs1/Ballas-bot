@@ -2,7 +2,7 @@ import os
 import re
 import sqlite3
 import asyncio
-from typing import Optional, Dict, Tuple
+from typing import Dict, Tuple
 
 import discord
 from discord.ext import commands
@@ -25,20 +25,11 @@ def init_db():
         cur = con.cursor()
 
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS member_channels (
-            guild_id INTEGER,
-            user_id INTEGER,
-            channel_id INTEGER,
-            PRIMARY KEY (guild_id, user_id)
-        )
-        """)
-
-        cur.execute("""
         CREATE TABLE IF NOT EXISTS submissions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             guild_id INTEGER,
             user_id INTEGER,
-            farm_channel_id INTEGER,
+            channel_id INTEGER,
             item TEXT,
             quantity INTEGER,
             image_url TEXT,
@@ -48,31 +39,39 @@ def init_db():
 
         con.commit()
 
-# ================= HELPERS =================
-
-def normalize_name(name: str):
-    name = name.lower()
-    name = re.sub(r"[^a-z0-9 ]", "", name)
-    name = name.replace(" ", "-")
-    return f"farm-{name}"
-
 # ================= BOT =================
 
 intents = discord.Intents.default()
 intents.members = True
 intents.guilds = True
 intents.messages = True
+intents.message_content = True  # ESSENCIAL
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 bot.pending_image: Dict[int, Tuple[str, int, int]] = {}
 
-# ================= VIEWS =================
+# ================= HELPERS =================
+
+def format_channel_name(name):
+    name = name.lower()
+    name = re.sub(r"[^a-z0-9 ]", "", name)
+    name = name.replace(" ", "-")
+    return f"farm-{name}"
+
+# ================= UI =================
 
 class FarmModal(discord.ui.Modal, title="Enviar Farm"):
 
-    item = discord.ui.TextInput(label="Item")
-    quantity = discord.ui.TextInput(label="Quantidade")
+    item = discord.ui.TextInput(
+        label="Item",
+        placeholder="Ex: Pólvora"
+    )
+
+    quantity = discord.ui.TextInput(
+        label="Quantidade",
+        placeholder="Ex: 1000"
+    )
 
     def __init__(self, user_id, channel_id):
         super().__init__()
@@ -83,30 +82,34 @@ class FarmModal(discord.ui.Modal, title="Enviar Farm"):
         try:
             qty = int(self.quantity.value)
         except:
-            await interaction.response.send_message("Quantidade inválida.", ephemeral=True)
+            await interaction.response.send_message(
+                "Quantidade inválida. Use apenas números.",
+                ephemeral=True
+            )
             return
 
-        bot.pending_image[self.user_id] = (self.item.value, qty, self.channel_id)
+        bot.pending_image[self.user_id] = (
+            self.item.value,
+            qty,
+            self.channel_id
+        )
 
         await interaction.response.send_message(
-            "Agora envie a FOTO do farm aqui no canal.",
+            "✅ Agora envie a FOTO do farm neste canal.",
             ephemeral=True
         )
 
 class FarmPanel(discord.ui.View):
-
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Enviar farm", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Enviar farm", style=discord.ButtonStyle.primary, emoji="📤")
     async def enviar(self, interaction: discord.Interaction, button: discord.ui.Button):
-
         await interaction.response.send_modal(
             FarmModal(interaction.user.id, interaction.channel.id)
         )
 
 class ApprovalView(discord.ui.View):
-
     def __init__(self, submission_id):
         super().__init__(timeout=None)
         self.submission_id = submission_id
@@ -119,7 +122,7 @@ class ApprovalView(discord.ui.View):
         await interaction.response.send_message("Sem permissão.", ephemeral=True)
         return False
 
-    @discord.ui.button(label="Aprovar", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Aprovar", style=discord.ButtonStyle.success, emoji="✅")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
 
         await interaction.response.defer(ephemeral=True)
@@ -134,7 +137,7 @@ class ApprovalView(discord.ui.View):
             await interaction.followup.send("Já processado.", ephemeral=True)
             return
 
-        user_id, item, qty, image_url, status = row
+        user_id, item, qty, image_url, _ = row
 
         with sqlite3.connect(DB_PATH) as con:
             con.execute("UPDATE submissions SET status='APPROVED' WHERE id=?",
@@ -143,7 +146,7 @@ class ApprovalView(discord.ui.View):
 
         user = await bot.fetch_user(user_id)
 
-        embed = discord.Embed(title="Farm Pago!")
+        embed = discord.Embed(title="✅ Farm Pago!")
         embed.add_field(name="Item", value=item)
         embed.add_field(name="Quantidade", value=str(qty))
         embed.set_thumbnail(url=image_url)
@@ -153,14 +156,10 @@ class ApprovalView(discord.ui.View):
         except:
             pass
 
-        try:
-            await interaction.message.delete()
-        except:
-            await interaction.message.edit(view=None)
-
+        await interaction.message.delete()
         await interaction.followup.send("Aprovado.", ephemeral=True)
 
-    @discord.ui.button(label="Rejeitar", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Rejeitar", style=discord.ButtonStyle.danger, emoji="❌")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
 
         await interaction.response.defer(ephemeral=True)
@@ -175,7 +174,7 @@ class ApprovalView(discord.ui.View):
             await interaction.followup.send("Já processado.", ephemeral=True)
             return
 
-        user_id, item, qty, status = row
+        user_id, item, qty, _ = row
 
         with sqlite3.connect(DB_PATH) as con:
             con.execute("UPDATE submissions SET status='REJECTED' WHERE id=?",
@@ -184,7 +183,7 @@ class ApprovalView(discord.ui.View):
 
         user = await bot.fetch_user(user_id)
 
-        embed = discord.Embed(title="Farm Rejeitado")
+        embed = discord.Embed(title="❌ Farm Rejeitado")
         embed.add_field(name="Item", value=item)
         embed.add_field(name="Quantidade", value=str(qty))
 
@@ -193,11 +192,7 @@ class ApprovalView(discord.ui.View):
         except:
             pass
 
-        try:
-            await interaction.message.delete()
-        except:
-            await interaction.message.edit(view=None)
-
+        await interaction.message.delete()
         await interaction.followup.send("Rejeitado.", ephemeral=True)
 
 # ================= EVENTS =================
@@ -205,13 +200,11 @@ class ApprovalView(discord.ui.View):
 @bot.event
 async def on_ready():
     print(f"Bot online: {bot.user}")
-
-    # REGISTRA VIEWS PERSISTENTES
     bot.add_view(FarmPanel())
     bot.add_view(ApprovalView(0))
 
 @bot.event
-async def on_member_join(member: discord.Member):
+async def on_member_join(member):
 
     if member.guild.id != GUILD_ID:
         return
@@ -221,7 +214,7 @@ async def on_member_join(member: discord.Member):
         return
 
     channel = await member.guild.create_text_channel(
-        normalize_name(member.display_name),
+        format_channel_name(member.display_name),
         category=category
     )
 
@@ -230,13 +223,13 @@ async def on_member_join(member: discord.Member):
 
     embed = discord.Embed(
         title="Seu canal foi criado!",
-        description="Clique no botão abaixo para enviar um farm."
+        description="Clique no botão abaixo para enviar seu farm."
     )
 
     await channel.send(member.mention, embed=embed, view=FarmPanel())
 
 @bot.event
-async def on_message(message: discord.Message):
+async def on_message(message):
 
     if message.author.bot:
         return
@@ -252,28 +245,30 @@ async def on_message(message: discord.Message):
     if message.channel.id != channel_id:
         return
 
-    image = message.attachments[0].url
+    image_url = message.attachments[0].url
 
     with sqlite3.connect(DB_PATH) as con:
         cur = con.cursor()
         cur.execute("""
-        INSERT INTO submissions (guild_id,user_id,farm_channel_id,item,quantity,image_url)
+        INSERT INTO submissions (guild_id,user_id,channel_id,item,quantity,image_url)
         VALUES (?,?,?,?,?,?)
-        """, (message.guild.id, message.author.id, channel_id, item, qty, image))
+        """, (message.guild.id, message.author.id, channel_id, item, qty, image_url))
         con.commit()
         submission_id = cur.lastrowid
 
     approval_channel = message.guild.get_channel(APPROVAL_CHANNEL_ID)
 
-    embed = discord.Embed(title="Nova solicitação")
+    embed = discord.Embed(title="🧾 Nova Solicitação")
     embed.add_field(name="Membro", value=message.author.mention)
     embed.add_field(name="Item", value=item)
     embed.add_field(name="Quantidade", value=str(qty))
-    embed.set_image(url=image)
+    embed.set_image(url=image_url)
 
     await approval_channel.send(embed=embed, view=ApprovalView(submission_id))
 
-    await message.channel.send("Enviado para aprovação.")
+    await message.channel.send("✅ Enviado para aprovação.")
+
+    await bot.process_commands(message)
 
 # ================= START =================
 

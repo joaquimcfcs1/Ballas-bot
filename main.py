@@ -16,7 +16,7 @@ APPROVAL_CHANNEL_ID = int(os.getenv("APPROVAL_CHANNEL_ID", "0"))
 STAFF_ROLE_ID = int(os.getenv("STAFF_ROLE_ID", "0"))
 PANEL_CHANNEL_ID = int(os.getenv("PANEL_CHANNEL_ID", "0"))
 
-# opcional: categoria para criar canais temporários
+# opcional (se quiser uma categoria só pros temporários)
 TEMP_FARM_CATEGORY_ID = int(os.getenv("TEMP_FARM_CATEGORY_ID", "0"))
 
 DB_PATH = "farmbot.sqlite3"
@@ -61,8 +61,10 @@ def db_get_temp_channel(guild_id: int, user_id: int) -> Optional[int]:
 def db_set_temp_channel(guild_id: int, user_id: int, channel_id: int):
     with sqlite3.connect(DB_PATH) as con:
         cur = con.cursor()
-        cur.execute("INSERT OR REPLACE INTO temp_channels (guild_id, user_id, channel_id) VALUES (?, ?, ?)",
-                    (guild_id, user_id, channel_id))
+        cur.execute(
+            "INSERT OR REPLACE INTO temp_channels (guild_id, user_id, channel_id) VALUES (?, ?, ?)",
+            (guild_id, user_id, channel_id),
+        )
         con.commit()
 
 
@@ -137,7 +139,7 @@ intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
 intents.messages = True
-intents.message_content = True  # recomendado (e ative no Developer Portal também)
+intents.message_content = True  # ative no Developer Portal também
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -172,7 +174,7 @@ class FarmModal(discord.ui.Modal, title="📤 Enviar Farm"):
         bot.pending_image[self.user_id] = (item, qty, self.temp_channel_id)
 
         await interaction.response.send_message(
-            "✅ Formulário recebido! Agora **envie a FOTO** do farm aqui neste canal (até **2 minutos**).",
+            "✅ Formulário recebido! Agora **envie a FOTO** do farm aqui (até **2 minutos**).",
             ephemeral=True
         )
 
@@ -189,7 +191,6 @@ class FarmModal(discord.ui.Modal, title="📤 Enviar Farm"):
 
 
 class TempChannelPanel(discord.ui.View):
-    # painel dentro do canal privado temporário
     def __init__(self, owner_id: int, temp_channel_id: int):
         super().__init__(timeout=None)
         self.owner_id = owner_id
@@ -204,42 +205,60 @@ class TempChannelPanel(discord.ui.View):
 
 
 class PublicPanel(discord.ui.View):
-    # painel do canal público: cria canal privado temporário
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Criar canal para enviar farm", style=discord.ButtonStyle.success, emoji="✅", custom_id="public_create_temp_btn")
     async def create_temp(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # responde rápido para nunca dar "interação falhou"
+        await interaction.response.defer(ephemeral=True)
+
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("Use isso dentro do servidor.", ephemeral=True)
+            await interaction.followup.send("Use isso dentro do servidor.", ephemeral=True)
             return
         if interaction.guild.id != GUILD_ID:
-            await interaction.response.send_message("Servidor não configurado.", ephemeral=True)
+            await interaction.followup.send("Servidor não configurado.", ephemeral=True)
             return
 
         guild = interaction.guild
         member = interaction.user
 
-        # já existe canal temp?
+        # se já existe canal aberto
         existing = db_get_temp_channel(guild.id, member.id)
         if existing:
             ch = guild.get_channel(existing)
             if isinstance(ch, discord.TextChannel):
-                await interaction.response.send_message(f"Você já tem um canal aberto: {ch.mention}", ephemeral=True)
+                await interaction.followup.send(f"Você já tem um canal aberto: {ch.mention}", ephemeral=True)
                 return
-            else:
-                db_clear_temp_channel(guild.id, member.id)
+            db_clear_temp_channel(guild.id, member.id)
 
-        category = guild.get_channel(TEMP_FARM_CATEGORY_ID) if TEMP_FARM_CATEGORY_ID else None
+        category = None
+        if TEMP_FARM_CATEGORY_ID:
+            cat = guild.get_channel(TEMP_FARM_CATEGORY_ID)
+            if isinstance(cat, discord.CategoryChannel):
+                category = cat
+
         overwrites = make_overwrites(guild, member)
         channel_name = f"farm-{safe_slug(member.display_name)}"
 
-        ch = await guild.create_text_channel(
-            name=channel_name,
-            category=category if isinstance(category, discord.CategoryChannel) else None,
-            overwrites=overwrites,
-            reason="Canal temporário de farm",
-        )
+        try:
+            ch = await guild.create_text_channel(
+                name=channel_name,
+                category=category,
+                overwrites=overwrites,
+                reason="Canal temporário de farm",
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ Não tenho permissão para **criar canal**.\n"
+                "Mesmo com ADM, verifique se alguma categoria/permissão bloqueia.\n"
+                "Dica: crie uma categoria e use `TEMP_FARM_CATEGORY_ID`.",
+                ephemeral=True
+            )
+            return
+        except Exception as e:
+            await interaction.followup.send(f"❌ Erro ao criar canal: `{type(e).__name__}`", ephemeral=True)
+            return
 
         db_set_temp_channel(guild.id, member.id, ch.id)
 
@@ -248,7 +267,8 @@ class PublicPanel(discord.ui.View):
             description="Clique no botão abaixo para abrir o formulário.\nDepois, envie a foto aqui.\n\n✅ Quando for aprovado/rejeitado, **este canal será apagado**."
         )
         await ch.send(member.mention, embed=embed, view=TempChannelPanel(owner_id=member.id, temp_channel_id=ch.id))
-        await interaction.response.send_message(f"Canal criado: {ch.mention}", ephemeral=True)
+
+        await interaction.followup.send(f"✅ Canal criado: {ch.mention}", ephemeral=True)
 
 
 class ApprovalView(discord.ui.View):
@@ -278,33 +298,36 @@ class ApprovalView(discord.ui.View):
 
         db_update_status(self.submission_id, status)
 
-        # DM
         user = await bot.fetch_user(user_id)
         if status == "APPROVED":
             dm = discord.Embed(title="✅ Farm Pago!", description="Seu farm foi **aprovado** e pago!")
         else:
-            dm = discord.Embed(title="❌ Farm Rejeitado", description="Seu farm foi **rejeitado**. Verifique e envie novamente.")
+            dm = discord.Embed(title="❌ Farm Rejeitado", description="Seu farm foi **rejeitado**. Envie novamente.")
         dm.add_field(name="Item", value=item, inline=True)
         dm.add_field(name="Quantidade", value=str(qty), inline=True)
         dm.set_thumbnail(url=image_url)
+
         try:
             await user.send(embed=dm)
         except discord.Forbidden:
             pass
 
-        # apagar registro no canal de aprovação
+        # apaga o registro no canal de aprovação
         try:
             await interaction.message.delete()
-        except discord.Forbidden:
-            await interaction.message.edit(view=None)
+        except:
+            try:
+                await interaction.message.edit(view=None)
+            except:
+                pass
 
-        # apagar canal temporário
+        # apaga o canal temporário
         guild = interaction.guild
         temp_ch = guild.get_channel(temp_channel_id)
         if isinstance(temp_ch, discord.TextChannel):
             try:
                 await temp_ch.delete(reason=f"Farm {status} - canal temporário")
-            except discord.Forbidden:
+            except:
                 pass
 
         db_clear_temp_channel(guild_id, user_id)
@@ -324,26 +347,24 @@ class ApprovalView(discord.ui.View):
 async def on_ready():
     print(f"✅ Logado como {bot.user} (ID: {bot.user.id})")
 
-    # Views persistentes (botões não quebram após restart)
     bot.add_view(PublicPanel())
 
-    # Observação: ApprovalView e TempChannelPanel são geradas por mensagem com custom_id,
-    # mas a view em si precisa existir no runtime quando o botão for clicado.
-    # Como elas são criadas no envio, funciona bem.
-
-    # Opcional: se quiser garantir painel no canal público
+    # envia painel novo sempre que o bot reiniciar (pra não clicar em botão velho)
     guild = bot.get_guild(GUILD_ID)
     if guild and PANEL_CHANNEL_ID:
         ch = guild.get_channel(PANEL_CHANNEL_ID)
         if isinstance(ch, discord.TextChannel):
-            # manda painel se não existir nenhum recente (simples)
+            embed = discord.Embed(
+                title="📤 Envio de Farm",
+                description="Clique no botão abaixo para criar seu canal privado temporário e enviar o farm."
+            )
             try:
-                embed = discord.Embed(
-                    title="📤 Envio de Farm",
-                    description="Clique no botão abaixo para criar seu canal privado temporário e enviar o farm."
-                )
-                await ch.send(embed=embed, view=PublicPanel())
-            except discord.Forbidden:
+                msg = await ch.send(embed=embed, view=PublicPanel())
+                try:
+                    await msg.pin()
+                except:
+                    pass
+            except:
                 pass
 
 
@@ -366,7 +387,6 @@ async def on_message(message: discord.Message):
         return
 
     att = message.attachments[0]
-    # aceita qualquer anexo, mas recomenda imagem
     if att.content_type and not att.content_type.startswith("image/"):
         return
 
@@ -383,7 +403,7 @@ async def on_message(message: discord.Message):
 
     approval_channel = message.guild.get_channel(APPROVAL_CHANNEL_ID)
     if not isinstance(approval_channel, discord.TextChannel):
-        await message.channel.send("⚠️ Canal de aprovação não configurado corretamente.")
+        await message.channel.send("⚠️ Canal de aprovação não configurado.")
         return
 
     embed = discord.Embed(title="🧾 Solicitação de Farm", description=f"ID: **{submission_id}**")
